@@ -155,11 +155,38 @@ then start serving it
 app.ws.build(.myBindable).at("ws").serve()
 ```
 > 💡Here you also could provide custom encoder/decoder
->  e,g, `app.ws.build(.myBindable).at("ws").encoder(JSONEncoder()).encoder(JSONDecoder()).serve()`
+>  e,g, `app.ws.build(.myBindable).at("ws").encoder(JSONEncoder()).decoder(JSONDecoder()).serve()`
+
+### Concurrency and observer setup
+
+Observer, client, bind-handler, broadcaster, and channel state is isolated to `WebSocketActor`.
+The application registry protects its dictionary and initialization with locks, and stores
+Sendable references to actor-isolated observers. Immutable metadata and observer lookups
+remain synchronous; await mutable state and operations from other executors.
+
+`setup()` runs once on `WebSocketActor`, before `on(open:)` and incoming messages.
+Async Vapor boot awaits preparation. Legacy synchronous boot schedules preparation, and
+connection handling also ensures it has completed before invoking callbacks. Builder encoder
+and decoder overrides are applied after `setup()`. Incoming callbacks are queued and processed
+in order per connection; closing drains prior events and removes the client once.
+
+```swift
+let observer = req.ws(.myBindable)
+let clients = await observer.clients
+try await observer.send(event: "message", payload: payload)
+```
+
+Synchronous callbacks such as `on(open:)` can start asynchronous work with a task:
+
+```swift
+override func on(open client: any AnyClient) {
+    Task { try? await client.send(event: "welcome", payload: payload) }
+}
+```
 
 ### How to send data
 
-Data sending works through `Sendable` protocol, which have several methods
+Data sending works through `WebSocketSendable`, which has several methods.
 ```swift
 .send(text: <StringProtocol>) // send message with text
 .send(bytes: <[UInt8]>) // send message with bytes
@@ -169,34 +196,36 @@ Data sending works through `Sendable` protocol, which have several methods
 .send(event: <EID>) // send bindable event
 .send(event: <EID>, payload: T?)
 ```
-> all these methods returns `EventLoopFuture<Void>`
+Text, byte, data and ping sends are `async`. Model and event sends are `async throws` because encoding can fail.
 
 Using methods listed above you could send messages to one or multiple clients.
 
 #### To one client e.g. in `on(open:)` or `on(text:)`
 ```swift
-client.send(...)
+try await client.send(event: "message", payload: payload)
 ```
 
 #### To all clients
 ```swift
-client.broadcast.send(...)
-client.broadcast.exclude(client).send(...) // excluding himself
-req.ws(.mywsid).broadcast.send(...)
+try await client.broadcast.send(event: "message", payload: payload)
+try await client.broadcast.exclude(client).send(event: "message", payload: payload) // excluding himself
+try await req.ws(.mywsid).broadcast.send(event: "message", payload: payload)
 ```
 
 #### To clients in channels
 ```swift
-client.broadcast.channels("news", "updates").send(...)
-req.ws(.mywsid).broadcast.channels("news", "updates").send(...)
+try await client.broadcast.channels("news", "updates").send(event: "message", payload: payload)
+try await req.ws(.mywsid).broadcast.channels("news", "updates").send(event: "message", payload: payload)
 ```
 
 #### To custom filtered clients
 e.g. you want to find all ws connections of the current user to send a message to all his devices
 ```swift
-req.ws(.mywsid).broadcast.filter { client in
+let broadcaster = await req.ws(.mywsid).broadcast
+let filtered = try await broadcaster.filter { client in
     req.headers[.authorization].first == client.originalRequest.headers[.authorization].first
-}.send(...)
+}
+try await filtered.send(event: "message", payload: payload)
 ```
 
 ### Broadcast
@@ -209,7 +238,7 @@ Available methods
 ```swift
 .encoder(Encoder) // set custom data encoder
 .exclude([AnyClient]) // exclude provided clients from clients
-.filter((AnyClient) -> Bool) // filter clients by closure result
+.filter((AnyClient) async throws -> Bool) // filter clients by async predicate
 .channels([String]) // filter clients by provided channels
 .subscribe([String]) // subscribe filtered clients to channels
 .unsubscribe([String]) // unsubscribe filtered clients from channels
@@ -222,13 +251,13 @@ Available methods
 
 #### Subscribe
 ```swift
-client.subscribe(to: ..., on: eventLoop) // will subscribe client to provided channels
+try await client.subscribe(to: ...) // subscribe the client to provided channels
 ```
-To subscribe to `news` and `updates` call it like this `client.subscribe(to: "news", "updates")`
+To subscribe to `news` and `updates`, use `try await client.subscribe(to: "news", "updates")`.
 
 #### Unsubscribe
 ```swift
-client.unsubscribe(from: ..., on: eventLoop) // will unsubscribe client from provided channels
+try await client.unsubscribe(from: ...) // unsubscribe the client from provided channels
 ```
 
 #### List
@@ -273,7 +302,7 @@ As you may see in every handler you always have `client` object. This object con
 - `exchangeMode` - client's observer exchange mode
 
 **conformance**
-- `Sendable` - so you can use `.send(...)`
+- `WebSocketSendable` - so you can use async `.send(...)`
 - `Subscribable` - so you can use `.subscribe(...)`, `.unsubscribe(...)`
 - `Disconnectable` - so you can call `.disconnect()` to disconnect that user
 

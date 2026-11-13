@@ -1,12 +1,13 @@
 import Vapor
 
-public typealias EmptyHandler = () -> Void
-public typealias OpenCloseHandler = (AnyClient) -> Void
-public typealias TextHandler = (AnyClient, String) -> Void
-public typealias ByteBufferHandler = (AnyClient, ByteBuffer) -> Void
-public typealias BinaryHandler = (AnyClient, Data) -> Void
+public typealias EmptyHandler = @WebSocketActor @Sendable () -> Void
+public typealias OpenCloseHandler = @WebSocketActor @Sendable (AnyClient) -> Void
+public typealias TextHandler = @WebSocketActor @Sendable (AnyClient, String) -> Void
+public typealias ByteBufferHandler = @WebSocketActor @Sendable (AnyClient, ByteBuffer) -> Void
+public typealias BinaryHandler = @WebSocketActor @Sendable (AnyClient, Data) -> Void
 
-public class DeclarativeHandlers {
+@WebSocketActor
+public final class DeclarativeHandlers {
     var openHandler: OpenCloseHandler?
     var closeHandler: OpenCloseHandler?
     var pingHandler: OpenCloseHandler?
@@ -16,6 +17,7 @@ public class DeclarativeHandlers {
     var binaryHandler: BinaryHandler?
 }
 
+@WebSocketActor
 public protocol Declarativable: AnyObserver {
     var handlers: DeclarativeHandlers { get }
 }

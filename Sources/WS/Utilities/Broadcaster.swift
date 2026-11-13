@@ -3,11 +3,12 @@ import Logging
 import Foundation
 import NIOWebSocket
 
-public class Broadcaster: Disconnectable, _Disconnectable, Sendable, _Sendable, Subscribable {
+@WebSocketActor
+public final class Broadcaster: Disconnectable, _Disconnectable, WebSocketSendable, _WebSocketSendable, Subscribable {
     let eventLoop: EventLoop
     var clients: [AnyClient]
     let exchangeMode: ExchangeMode
-    let logger: Logger
+    nonisolated let logger: Logger
     var encoder: Encoder?
     let defaultEncoder: Encoder?
     
@@ -19,7 +20,7 @@ public class Broadcaster: Disconnectable, _Disconnectable, Sendable, _Sendable, 
             return encoder
         }
         let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .formatted(DefaultDateFormatter())
+        encoder.dateEncodingStrategy = .formatted(DefaultDateFormatter.make())
         return encoder
     }
     
@@ -83,20 +84,19 @@ public class Broadcaster: Disconnectable, _Disconnectable, Sendable, _Sendable, 
         return self
     }
     
-    /// Filter recipients by closure result
-    public func filter(_ filter: @escaping (AnyClient) -> EventLoopFuture<Bool>) -> EventLoopFuture<Broadcaster> {
-        var ids: Set<UUID> = []
-        return clients.map { client in
-            filter(client).map { leave in
-                if !leave {
-                    ids.insert(client.id)
-                }
+    /// Filter recipients by asynchronously evaluated predicate.
+    public func filter(_ predicate: (AnyClient) async throws -> Bool) async throws -> Broadcaster {
+        var retained: [AnyClient] = []
+        for client in clients {
+            if try await predicate(client) {
+                retained.append(client)
             }
-        }.flatten(on: eventLoop).map {
-            self.clients.removeAll { ids.contains($0.id) }
-        }.transform(to: self)
+        }
+        clients = retained
+        cachedSockets = nil
+        return self
     }
-    
+
     /// Filter recipients by provided channels
     public func channels(_ channels: String...) -> Self {
         self.channels(channels)
@@ -110,67 +110,61 @@ public class Broadcaster: Disconnectable, _Disconnectable, Sendable, _Sendable, 
         return self
     }
     
-    /// See `Subscribable`
-    
-    /// Subscribe filtered clients to channels
-    public func subscribe(to channels: [String], on eventLoop: EventLoop) -> EventLoopFuture<Void> {
-        clients.map {
-            $0.subscribe(to: channels, on: eventLoop)
-        }.flatten(on: eventLoop)
-    }
-    
-    /// Unsubscribe filtered clients from channels
-    public func unsubscribe(from channels: [String], on eventLoop: EventLoop) -> EventLoopFuture<Void> {
-        clients.map {
-            $0.unsubscribe(from: channels, on: eventLoop)
-        }.flatten(on: eventLoop)
-    }
-    
-    /// See `Disconnectable`
-    
-    public func disconnect() -> EventLoopFuture<Void> {
-        _disconnect()
+    /// Subscribe filtered clients to channels.
+    public func subscribe(to channels: [String]) async throws {
+        for client in clients {
+            try await client.subscribe(to: channels)
+        }
     }
 
-    public func disconnect(code: WebSocketErrorCode) -> EventLoopFuture<Void> {
-        _disconnect(code: code)
+    /// Unsubscribe filtered clients from channels.
+    public func unsubscribe(from channels: [String]) async throws {
+        for client in clients {
+            try await client.unsubscribe(from: channels)
+        }
     }
-    
-    /// See `Sendable`
-    
-    public func send<S>(text: S) -> EventLoopFuture<Void> where S : Collection, S.Element == Character {
+
+    public func disconnect() async throws {
+        try await _disconnect()
+    }
+
+    public func disconnect(code: WebSocketErrorCode) async throws {
+        try await _disconnect(code: code)
+    }
+
+    public func send<S>(text: S) async where S: Collection, S.Element == Character {
         _send(text: text)
     }
 
-    public func send(bytes: [UInt8]) -> EventLoopFuture<Void> {
+    public func send(bytes: [UInt8]) async {
         _send(bytes: bytes)
     }
 
-    public func send<Data>(data: Data) -> EventLoopFuture<Void> where Data : DataProtocol {
+    public func send<Data>(data: Data) async where Data: DataProtocol {
         _send(data: data)
     }
-    
-    public func send<Data>(data: Data, opcode: WebSocketOpcode) -> EventLoopFuture<Void> where Data: DataProtocol {
+
+    public func send<Data>(data: Data, opcode: WebSocketOpcode) async where Data: DataProtocol {
         _send(data: data, opcode: opcode)
     }
-    
-    public func send<C>(model: C) -> EventLoopFuture<Void> where C: Encodable {
-        _send(model: model)
+
+    public func send<C>(model: C) async throws where C: Encodable {
+        try _send(model: model)
     }
-    
-    public func send<C>(model: C, encoder: Encoder) -> EventLoopFuture<Void> where C: Encodable {
-        _send(model: model, encoder: encoder)
+
+    public func send<C>(model: C, encoder: Encoder) async throws where C: Encodable {
+        try _send(model: model, encoder: encoder)
     }
-    
-    public func send<T: Codable>(event: EID<T>) -> EventLoopFuture<Void> {
-        _send(event: event, payload: nil)
+
+    public func send<T: Codable>(event: EID<T>) async throws {
+        try _send(event: event)
     }
-    
-    public func send<T: Codable>(event: EID<T>, payload: T?) -> EventLoopFuture<Void> {
-        _send(event: event, payload: payload)
+
+    public func send<T: Codable>(event: EID<T>, payload: T?) async throws {
+        try _send(event: event, payload: payload)
     }
-    
-    public func sendPing() -> EventLoopFuture<Void> {
+
+    public func sendPing() async {
         _sendPing()
     }
 }

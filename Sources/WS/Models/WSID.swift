@@ -1,6 +1,6 @@
 import Vapor
 
-public protocol AnyWSID {
+public protocol AnyWSID: Swift.Sendable {
     var key: String { get }
 }
 

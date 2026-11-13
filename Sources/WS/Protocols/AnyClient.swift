@@ -2,24 +2,25 @@ import Foundation
 import Vapor
 import NIOWebSocket
 
-public protocol AnyClient: Broadcastable, Disconnectable, Subscribable, Sendable {
-    var id: UUID { get }
-    var application: Application { get }
-    var eventLoop: EventLoop { get }
-    var originalRequest: Request { get }
+@WebSocketActor
+public protocol AnyClient: Swift.Sendable, Broadcastable, Disconnectable, Subscribable, WebSocketSendable {
+    nonisolated var id: UUID { get }
+    nonisolated var application: Application { get }
+    nonisolated var eventLoop: EventLoop { get }
+    nonisolated var originalRequest: Request { get }
     var channels: Set<String> { get }
-    var socket: WebSocket { get }
-    var observer: AnyObserver { get }
+    nonisolated var socket: WebSocket { get }
+    nonisolated var observer: AnyObserver { get }
 }
 
-internal protocol _AnyClient: AnyClient, _Disconnectable, _Subscribable, _Sendable {
+internal protocol _AnyClient: AnyClient, _Disconnectable, _Subscribable, _WebSocketSendable {
     var _observer: _AnyObserver { get }
     var channels: Set<String> { get set }
 }
 
 extension AnyClient {
-    public var eventLoop: EventLoop { application.ws.knownEventLoop }
-    public var logger: Logger { application.logger }
+    nonisolated public var eventLoop: EventLoop { application.ws.knownEventLoop }
+    nonisolated public var logger: Logger { application.logger }
     
     /// See `Broadcastable`
     public var broadcast: Broadcaster {

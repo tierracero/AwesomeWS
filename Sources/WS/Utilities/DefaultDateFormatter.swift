@@ -1,43 +1,30 @@
 import Foundation
 
-class DefaultDateFormatter: DateFormatter {
-    func setup() {
-        self.calendar = Calendar(identifier: .iso8601)
-        self.locale = Locale(identifier: "en_US_POSIX")
-        self.timeZone = TimeZone(identifier: "UTC")
-        //with milliseconds and without timezone
-        self.dateFormat = "yyyy-MM-dd'T'HH:mm:ss'Z'"
+/// Creates a formatter per operation, so parsing never mutates a shared formatter.
+enum DefaultDateFormatter {
+    static func make() -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .iso8601)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss'Z'"
+        return formatter
     }
-    
-    override init() {
-        super.init()
-        setup()
-    }
-    
-    required init?(coder aDecoder: NSCoder) {
-        super.init(coder: aDecoder)
-        setup()
-    }
-    
-    override func date(from string: String) -> Date? {
-        let string = string.replacingOccurrences(of: "T", with: " ")
-        //with milliseconds and without timezone
-        dateFormat = "yyyy-MM-dd HH:mm:ss.SSSSSS"
-        if let result = super.date(from: string) {
-            return result
+
+    static func decode(_ decoder: any Swift.Decoder) throws -> Date {
+        let container = try decoder.singleValueContainer()
+        let value = try container.decode(String.self)
+        let normalized = value.replacingOccurrences(of: "T", with: " ")
+        let formatter = make()
+        for format in [
+            "yyyy-MM-dd HH:mm:ss.SSSSSS",
+            "yyyy-MM-dd HH:mm:ss",
+            "yyyy-MM-dd HH:mm:ss.SSSSSSZZZZZ",
+            "yyyy-MM-dd HH:mm:ssZZZZZ"
+        ] {
+            formatter.dateFormat = format
+            if let date = formatter.date(from: normalized) { return date }
         }
-        //without milliseconds and without timezone
-        dateFormat = "yyyy-MM-dd HH:mm:ss"
-        if let result = super.date(from: string) {
-            return result
-        }
-        //with milliseconds and timezone
-        dateFormat = "yyyy-MM-dd HH:mm:ss.SSSSSSZZZZZ"
-        if let result = super.date(from: string) {
-            return result
-        }
-        //without milliseconds and with timezone
-        dateFormat = "yyyy-MM-dd HH:mm:ssZZZZZ"
-        return super.date(from: string)
+        throw DecodingError.dataCorruptedError(in: container, debugDescription: "Invalid WebSocket date")
     }
 }

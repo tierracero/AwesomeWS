@@ -63,15 +63,13 @@ public class EndpointBuilder<Observer: AnyObserver> {
         _ = application.ws.knownEventLoop
         let observer = Observer.init(app: application, key: wsid.key, path: path.string, exchangeMode: exchangeMode)
         
-        if let encoder = encoder {
-            observer.encoder = encoder
-        }
-        if let decoder = decoder {
-            observer.decoder = decoder
-        }
+        let configuration = ObserverLifecycle(observer: observer, encoder: encoder, decoder: decoder)
+        application.lifecycle.use(configuration)
         
         application.wsStorage[wsid.key] = observer
-        WSRoute(root: application.grouped(middlewares), path: path).webSocket(onUpgrade: observer.handle)
+        WSRoute(root: application.grouped(middlewares), path: path).webSocket { req, socket in
+            observer.handle(req, socket, encoder: configuration.encoder, decoder: configuration.decoder)
+        }
         
         let observerType = String(describing: Observer.self)
         application.logger.notice("[⚡️] 🚀 \(observerType) starting on \(application.http.server.configuration.address)/\(path.string)")
@@ -97,5 +95,24 @@ fileprivate final class WSRoute: RoutesBuilder {
     func add(_ route: Route) {
         route.path = self.path + route.path
         self.root.add(route)
+    }
+}
+
+private struct ObserverLifecycle: LifecycleHandler {
+    let observer: any AnyObserver
+    let encoder: (any Encoder)?
+    let decoder: (any Decoder)?
+
+    func willBoot(_ application: Application) throws {
+        Task { @WebSocketActor in prepare() }
+    }
+
+    func willBootAsync(_ application: Application) async throws {
+        await prepare()
+    }
+
+    @WebSocketActor
+    private func prepare() {
+        (observer as? any _AnyObserver)?.initialize(encoder: encoder, decoder: decoder)
     }
 }

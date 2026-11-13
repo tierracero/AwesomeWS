@@ -8,7 +8,7 @@ import Foundation
 ///     static var userOnline: EID<UserModel> { .init("userOnline") }
 /// }
 /// ```
-public struct EID<P: Codable>: Equatable, Hashable, CustomStringConvertible, ExpressibleByStringLiteral {
+public struct EID<P: Codable>: Equatable, Hashable, CustomStringConvertible, ExpressibleByStringLiteral, Sendable {
     /// The unique id.
     public let id: String
     

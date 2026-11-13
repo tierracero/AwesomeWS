@@ -1,17 +1,18 @@
 import Vapor
 
-public protocol AnyObserver: class, Broadcastable, CustomStringConvertible, Disconnectable, Sendable, Loggable {
-    var key: String { get }
-    var path: String { get }
+@WebSocketActor
+public protocol AnyObserver: AnyObject, Swift.Sendable, Broadcastable, CustomStringConvertible, Disconnectable, WebSocketSendable, Loggable {
+    nonisolated var key: String { get }
+    nonisolated var path: String { get }
     
-    var application: Application { get }
-    var eventLoop: EventLoop { get }
+    nonisolated var application: Application { get }
+    nonisolated var eventLoop: EventLoop { get }
     var clients: [AnyClient] { get }
     var encoder: Encoder? { get set }
     var decoder: Decoder? { get set }
-    var exchangeMode: ExchangeMode { get }
+    nonisolated var exchangeMode: ExchangeMode { get }
     
-    init (app: Application, key: String, path: String, exchangeMode: ExchangeMode)
+    nonisolated init (app: Application, key: String, path: String, exchangeMode: ExchangeMode)
     
     func setup()
     
@@ -24,11 +25,13 @@ public protocol AnyObserver: class, Broadcastable, CustomStringConvertible, Disc
     func on(data: Data, client: AnyClient)
 }
 
-internal protocol _AnyObserver: AnyObserver, _Disconnectable, _Sendable {
+internal protocol _AnyObserver: AnyObserver, _Disconnectable, _WebSocketSendable {
     var _clients: [_AnyClient] { get set }
     var _encoder: Encoder { get }
     var _decoder: Decoder { get }
     
+    func initialize(encoder: (any Encoder)?, decoder: (any Decoder)?)
+
     func _on(open client: _AnyClient)
     func _on(close client: _AnyClient)
     func _on(ping client: _AnyClient)
@@ -41,7 +44,7 @@ internal protocol _AnyObserver: AnyObserver, _Disconnectable, _Sendable {
 // MARK: - Default implementation
 
 extension AnyObserver {
-    public var eventLoop: EventLoop { application.ws.knownEventLoop }
+    nonisolated public var eventLoop: EventLoop { application.ws.knownEventLoop }
    
     var _encoder: Encoder {
         if let encoder = self.encoder {
@@ -51,7 +54,7 @@ extension AnyObserver {
             return encoder
         }
         let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .formatted(DefaultDateFormatter())
+        encoder.dateEncodingStrategy = .formatted(DefaultDateFormatter.make())
         return encoder
     }
     
@@ -63,13 +66,18 @@ extension AnyObserver {
             return decoder
         }
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .formatted(DefaultDateFormatter())
+        decoder.dateDecodingStrategy = .custom(DefaultDateFormatter.decode)
         return decoder
     }
     
-    func handle(_ req: Request, _ ws: WebSocketKit.WebSocket) {
-        guard let self = self as? _AnyObserver else { return }
-        self.handle(req, ws)
+    nonisolated func handle(
+        _ req: Request,
+        _ ws: WebSocketKit.WebSocket,
+        encoder: (any Encoder)?,
+        decoder: (any Decoder)?
+    ) {
+        guard let self = self as? any _AnyObserver else { return }
+        self.handle(req, ws, encoder: encoder, decoder: decoder)
     }
     
     /// See `Broadcastable`
@@ -84,97 +92,74 @@ extension AnyObserver {
     }
     
     /// see `CustomStringConvertible`
-    public var description: String {
+    nonisolated public var description: String {
         "\(String(describing: Self.self))(key: \"\(key)\", at: \"\(path)\")"
     }
 }
 
 extension _AnyObserver {
     var clients: [AnyClient] { _clients }
-    var observer: _AnyObserver { self }
+    nonisolated var observer: _AnyObserver { self }
     var sockets: [WebSocket] { _clients.flatMap { $0.sockets } }
     
-    /// Internal handler
-    
-    func handle(_ req: Request, _ ws: WebSocketKit.WebSocket) {
-        var client: Client?
-        
-        self.application.ws.knownEventLoop.submit { [weak self] in
-            guard let self = self else { return }
-            let c = Client(self, req, ws, logger: self.logger)
-            client = c
-            self._clients.append(c)
-        }.whenComplete { [weak self] _ in
-            guard
-                let client = client,
-                let self = self
-            else { return }
-            self._on(open: client)
-            self.on(open: client)
-            self.logger.info("[⚡️] 🟢 new connection \(client.id)")
-        }
+    /// Only the actor consumer touches client state; callbacks enqueue events in wire order.
+    nonisolated func handle(
+        _ req: Request,
+        _ ws: WebSocketKit.WebSocket,
+        encoder: (any Encoder)?,
+        decoder: (any Decoder)?
+    ) {
+        let (events, continuation) = AsyncStream<InboundEvent>.makeStream()
+        ws.onText { _, text in continuation.yield(.text(text)) }
+        ws.onBinary { _, buffer in continuation.yield(.binary(buffer)) }
+        ws.onPing { _, _ in continuation.yield(.ping) }
+        ws.onPong { _, _ in continuation.yield(.pong) }
+        ws.onClose.whenComplete { _ in continuation.finish() }
 
-        ws.onClose.whenComplete { [weak self] _ in
-            guard let self = self else { return }
-            self.application.ws.knownEventLoop.submit { [weak self] in
-                self?._clients.removeAll(where: { $0 === client })
-            }.whenComplete { [weak self] _ in
-                guard let c = client, let self = self else { return }
-                self.logger.info("[⚡️] 🔴 connection closed \(c.id)")
-                self._on(close: c)
-                self.on(close: c)
-                client = nil
+        Task { @WebSocketActor in
+            initialize(encoder: encoder, decoder: decoder)
+            let client = Client(self, req, ws, logger: logger)
+            _clients.append(client)
+            _on(open: client)
+            on(open: client)
+            logger.info("[⚡️] 🟢 new connection \(client.id)")
+
+            for await event in events {
+                switch event {
+                case .ping:
+                    _on(ping: client)
+                    on(ping: client)
+                case .pong:
+                    _on(pong: client)
+                    on(pong: client)
+                case .text(let text):
+                    guard exchangeMode != .binary else {
+                        logger.warning("[⚡️] Incoming text rejected in binary mode")
+                        continue
+                    }
+                    _on(text: text, client: client)
+                    on(text: text, client: client)
+                case .binary(let buffer):
+                    guard exchangeMode != .text else {
+                        logger.warning("[⚡️] Incoming binary data rejected in text mode")
+                        continue
+                    }
+                    _on(byteBuffer: buffer, client: client)
+                    on(byteBuffer: buffer, client: client)
+                    guard buffer.readableBytes > 0 else { continue }
+                    let data = Data(buffer.readableBytesView)
+                    _on(data: data, client: client)
+                    on(data: data, client: client)
+                }
             }
-        }
-        
-        ws.onPing { [weak self] _ in
-            guard let client = client else { return }
-            self?.logger.debug("[⚡️] 🏓 ping \(client.id)")
-            self?._on(ping: client)
-            self?.on(ping: client)
-        }
-        
-        ws.onPong { [weak self] _ in
-            guard let client = client else { return }
-            self?.logger.debug("[⚡️] 🏓 pong \(client.id)")
-            self?._on(pong: client)
-            self?.on(pong: client)
-        }
-        
-        ws.onText { [weak self] _, text in
-            guard
-                let client = client,
-                let self = self
-            else { return }
-            guard self.exchangeMode != .binary else {
-                self.logger.warning("[⚡️] ❗️📤❗️incoming text event has been rejected. Observer is in `binary` mode.")
-                return
-            }
-            self.logger.debug("[⚡️] 📥 \(client.id) text: \(text)")
-            self._on(text: text, client: client)
-            self.on(text: text, client: client)
-        }
-        
-        ws.onBinary { [weak self] _, byteBuffer in
-            guard
-                let client = client,
-                let self = self
-            else { return }
-            guard self.exchangeMode != .text else {
-                self.logger.warning("[⚡️] ❗️📤❗️incoming binary event has been rejected. Observer is in `text` mode.")
-                return
-            }
-            self.logger.debug("[⚡️] 📥 \(client.id) data: \(byteBuffer.readableBytes)")
-            self._on(byteBuffer: byteBuffer, client: client)
-            self.on(byteBuffer: byteBuffer, client: client)
-            guard byteBuffer.readableBytes > 0 else { return }
-            var bytes: [UInt8] = byteBuffer.getBytes(at: byteBuffer.readerIndex, length: byteBuffer.readableBytes) ?? []
-            let data = Data(bytes: &bytes, count: byteBuffer.readableBytes)
-            self._on(data: data, client: client)
-            self.on(data: data, client: client)
+
+            _clients.removeAll { $0 === client }
+            logger.info("[⚡️] 🔴 connection closed \(client.id)")
+            _on(close: client)
+            on(close: client)
         }
     }
-    
+
     public func on(open client: AnyClient) {}
     public func on(close client: AnyClient) {}
     public func on(ping client: AnyClient) {}
@@ -190,4 +175,11 @@ extension _AnyObserver {
     func _on(text: String, client: _AnyClient) {}
     func _on(byteBuffer: ByteBuffer, client: _AnyClient) {}
     func _on(data: Data, client: _AnyClient) {}
+}
+
+private enum InboundEvent: Swift.Sendable {
+    case text(String)
+    case binary(ByteBuffer)
+    case ping
+    case pong
 }

@@ -1,4 +1,4 @@
-public enum ExchangeMode {
+public enum ExchangeMode: Swift.Sendable {
     /// all the messages will be sent and received as `text`
     case text
     
